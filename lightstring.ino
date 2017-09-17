@@ -1,12 +1,3 @@
-/*
- *  This sketch demonstrates how to set up a simple HTTP-like server.
- *  The server will set a GPIO pin depending on the request
- *    http://server_ip/gpio/0 will set the GPIO2 low,
- *    http://server_ip/gpio/1 will set the GPIO2 high
- *  server_ip is the IP address of the ESP8266 module, will be 
- *  printed to Serial when the module is connected.
- */
-
 #include <ESP8266WiFi.h>
 #include <Adafruit_NeoPixel.h>
 #ifdef __AVR__
@@ -15,15 +6,15 @@
 
 // Which pin on the Arduino is connected to the NeoPixels?
 // On a Trinket or Gemma we suggest changing this to 1
-#define PIN            14
+#define PIN            4
 
 // How many NeoPixels are attached to the Arduino?
-#define NUMPIXELS      150
+#define NUMPIXELS      20
 
 #define BUFSIZE        2048
 
 const char* ssid = "SSID";
-const char* password = "PW";
+const char* password = "PASSWORD";
 
 // Create an instance of the server
 // specify the port to listen on as an argument
@@ -33,21 +24,11 @@ Adafruit_NeoPixel pixels = Adafruit_NeoPixel(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ80
 
 byte buf[BUFSIZE];
 
-void setAllPixels(uint32_t color) {
-  Serial.print("Setting all pixels to ");
-  Serial.println(color);
-  for (int i = 0; i < pixels.numPixels(); i++) {
-    pixels.setPixelColor(i, color);
-  }
-  pixels.show();
-}
-
 void setup() {
   Serial.begin(115200);
   delay(10);
 
   pixels.begin();
-  setAllPixels(pixels.Color(0, 0, 0));
 
   // Connect to WiFi network
   Serial.println();
@@ -121,7 +102,7 @@ void printCommand(byte *cmd) {
 WiFiClient client;
 
 void loop() {
-  if(!client || !client.connected()) {
+  /*if(!client) {
     // Check if a client has connected
     WiFiClient newClient = server.available();
     if (!newClient) {
@@ -129,11 +110,19 @@ void loop() {
     }
     Serial.println("new client");
     client = newClient;
+  }*/
+
+  // Check if a client has connected
+  WiFiClient newClient = server.available();
+  if (newClient) {
+    Serial.println("new client");
+    //WiFiClient::stopAllExcept(&newClient);
+    client = newClient;
   }
 
-  // Wait until the client sends some data
-  while(!client.available()) {
+  if (!client || !client.connected() || !client.available()) {
     delay(1);
+    return;
   }
 
   int bytesRead = client.read(buf, BUFSIZE);
