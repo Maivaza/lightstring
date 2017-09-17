@@ -7,8 +7,12 @@ import socket
 import sys
 import re
 import time
+import random
+
+from color_wheel import color_wheel
 
 MAX_PKT_LEN = 32768
+#MAX_PKT_LEN = 1024
 
 # <lenH><lenL> <what_command> <delay> <start_index> <length> <r><g><b>...
 def _add_length(cmd):
@@ -188,14 +192,15 @@ def streamer_white_cycle(conn, num_pix, ms_half):
     WHITE = (8,8,8)
     BLACK = (0,0,0)
     direction = 1
-    pixels = collections.deque([WHITE] + [BLACK] * num_pix)
+    pixels = collections.deque([WHITE] + [BLACK] * (num_pix - 1))
 
     delay = ms_half // num_pix
-    delays = [255] * (delay // 256) + [delay % 256]
+    #delays = [255] * (delay // 256) + [delay % 256]
 
     while True:
-        for delay in delays:
-            conn.send_buffered(build_command_write(0, list(pixels), delay))
+        conn.send_buffered(build_command_write(0, list(pixels), 0))
+        conn.flush()
+        time.sleep(delay / 1000)
 
         if direction == 1:
             pixels.appendleft(pixels.pop())
@@ -205,6 +210,18 @@ def streamer_white_cycle(conn, num_pix, ms_half):
             pixels.append(pixels.popleft())
             if pixels[0] == WHITE:
                 direction = 1
+
+def streamer_color_wheel(conn, starting_idxes, ms, steps, brightness):
+    idxes = starting_idxes
+    delay = ms // steps
+    while True:
+        pixels = scale_pixels([color_wheel(idx, steps) for idx in idxes], brightness * 2.55)
+
+        conn.send_buffered(build_command_write(0, pixels, 0))
+        conn.flush()
+        time.sleep(delay / 1000)
+
+        idxes = [x + 1 if x < steps else 0 for x in idxes]
 
 class Streamer(object):
     def __init__(self, host, port=10000):
@@ -232,8 +249,6 @@ class Streamer(object):
         if self.cmd_buffer:
             pkt = build_packet(self.cmd_buffer)
             self.socket.send(pkt)
-            total_delay = compute_total_delay(self.cmd_buffer)
-            time.sleep((total_delay - 10) / 1000)
             self.cmd_buffer = []
 
     def close(self):
@@ -241,10 +256,18 @@ class Streamer(object):
             self.socket.close()
             self.socket = None
 
+def main_shift(args):
+    conn = Streamer(args.host, args.port)
+    streamer_white_cycle(conn, args.num_pixels, args.ms)
+
+def main_wheel(args):
+    conn = Streamer(args.host, args.port)
+    streamer_color_wheel(conn, [0 for _ in range(args.num_pixels)], args.ms, args.steps, args.brightness)
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--host", help="IP address to connect to")
-    parser.add_argument("-p", "--port", type=int, default=1000, help="Port to connect to (default: 10000)")
+    parser.add_argument("-p", "--port", type=int, default=10000, help="Port to connect to (default: 10000)")
     subparsers = parser.add_subparsers(title='subcommands')
 
     write_parser = subparsers.add_parser('write')
@@ -256,11 +279,21 @@ def main():
     write_parser.add_argument("--repeat", type=int, default=1, help="Number of times to repeat color sequence given (default: 1)")
     write_parser.add_argument("color", nargs='*', help="Color of pixel: dec r,g,b; hex rrggbb; any html color name")
 
+    shift_parser = subparsers.add_parser('shift')
+    shift_parser.set_defaults(func=main_shift)
+    shift_parser.add_argument("--num-pixels", type=int, required=True, help="Number of pixels wide")
+    shift_parser.add_argument("--ms", type=int, required=True, help="Time for half-run in ms")
+
+    wheel_parser = subparsers.add_parser('wheel')
+    wheel_parser.set_defaults(func=main_wheel)
+    wheel_parser.add_argument("--num-pixels", type=int, required=True, help="Number of pixels wide")
+    wheel_parser.add_argument("--steps", type=int, required=True, help="Number of color wheel steps")
+    wheel_parser.add_argument("--ms", type=int, required=True, help="Time for half-run in ms")
+    wheel_parser.add_argument('--brightness', type=float, default=100.0,
+                              help="Scale brightness to this percent (default: 100)")
+
     args = parser.parse_args()
     args.func(args)
 
 if __name__ == '__main__':
-    #conn = Streamer('192.168.60.206')
-    #streamer_white_cycle(conn, 10, 1000)
-    #send_commands('192.168.60.207', 10000, white_cycle(10, 1000))
     main()
