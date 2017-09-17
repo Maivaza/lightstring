@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import re
+import time
 
 MAX_PKT_LEN = 32768
 
@@ -180,6 +181,66 @@ def white_cycle(num_pix, ms):
         if pixels[0][0]:
             direction *= -1
 
+def compute_total_delay(cmds):
+    return sum(cmd[3] for cmd in cmds if cmd[2] == b'w')
+
+def streamer_white_cycle(conn, num_pix, ms_half):
+    WHITE = (8,8,8)
+    BLACK = (0,0,0)
+    direction = 1
+    pixels = collections.deque([WHITE] + [BLACK] * num_pix)
+
+    delay = ms_half // num_pix
+    delays = [255] * (delay // 256) + [delay % 256]
+
+    while True:
+        for delay in delays:
+            conn.send_buffered(build_command_write(0, list(pixels), delay))
+
+        if direction == 1:
+            pixels.appendleft(pixels.pop())
+            if pixels[-1] == WHITE:
+                direction = -1
+        else:
+            pixels.append(pixels.popleft())
+            if pixels[0] == WHITE:
+                direction = 1
+
+class Streamer(object):
+    def __init__(self, host, port=10000):
+        self.host = host
+        self.port = port
+        self.socket = None
+        self.cmd_buffer = []
+
+    def connect(self):
+        self.socket = socket.socket()
+        self.socket.connect((self.host, self.port))
+
+    def send_buffered(self, cmd):
+        if not self.socket:
+            self.connect()
+
+        try:
+            build_packet(self.cmd_buffer + [cmd])
+        except ValueError:
+            self.flush()
+
+        self.cmd_buffer.append(cmd)
+
+    def flush(self):
+        if self.cmd_buffer:
+            pkt = build_packet(self.cmd_buffer)
+            self.socket.send(pkt)
+            total_delay = compute_total_delay(self.cmd_buffer)
+            time.sleep((total_delay - 10) / 1000)
+            self.cmd_buffer = []
+
+    def close(self):
+        if self.socket:
+            self.socket.close()
+            self.socket = None
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--host", help="IP address to connect to")
@@ -199,5 +260,7 @@ def main():
     args.func(args)
 
 if __name__ == '__main__':
+    #conn = Streamer('192.168.60.206')
+    #streamer_white_cycle(conn, 10, 1000)
     #send_commands('192.168.60.207', 10000, white_cycle(10, 1000))
     main()
