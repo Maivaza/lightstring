@@ -1,9 +1,13 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 from __future__ import absolute_import, print_function, division
 import argparse
+import collections
 import os
 import socket
 import sys
+import re
+
+MAX_PKT_LEN = 32768
 
 # <lenH><lenL> <what_command> <delay> <start_index> <length> <r><g><b>...
 def _add_length(cmd):
@@ -40,24 +44,143 @@ def build_command_write(start, pixels, delay):
 
 def build_packet(commands):
     """Build a packet made of 0 to N command bytestrings"""
-    return b''.join(commands) + b'\x00\x00'
+    pkt = b''.join(commands) + b'\x00\x00'
+    if len(pkt) > MAX_PKT_LEN:
+        raise ValueError("Packet too large")
+    return pkt
 
-def send_one_write(args):
-    # Send a single write to the specified host and disconnect
-    s = socket.socket()
-    s.connect((args.host, args.port))
+def color_to_rgb(color):
+    m = re.match(r'(?i)([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})', color)
+    if m:
+        return tuple(int(x, 16) for x in m.groups())
+
+    m = re.match(r'([0-9]{1,3}),([0-9]{1,3}),([0-9]{1,3})', color)
+    if m:
+        return tuple(int(x) for x in m.groups())
+
+    try:
+        import webcolors
+        return webcolors.name_to_rgb(color)
+    except ImportError:
+        raise ValueError("Unrecognized color: %r - (note: webcolors not installed)" % color)
+    except Exception:
+        raise ValueError("Unrecognized color: %r" % color)
+
+def scale_pixels(pixels, sf):
+    return [(int(r * sf), int(g * sf), int(b * sf)) for (r, g, b) in pixels]
+
+def lerp(a, b, t, steps):
+    return a + t * (b - a) / steps
+
+def flatten(pixels):
+    return [x for y in pixels for x in y]
+
+def structure(flat_pix):
     pixels = [[]]
-    for x in args.rgb:
+    for x in flat_pix:
         if len(pixels[-1]) == 3:
+            pixels[-1] = tuple(pixels[-1])
             pixels.append([])
         pixels[-1].append(x)
-    pkt = build_packet([build_command_write(args.start, pixels, args.delay)])
-    print("Sending packet: %r" % pkt, file=sys.stderr)
+    assert len(pixels[-1]) == 3
+    return pixels
+
+def lerp_pixels(pixelsA, pixelsB, t, steps):
+    return structure([int(lerp(a, b, t, steps)) for (a, b) in zip(flatten(pixelsA), flatten(pixelsB))])
+
+def fade(pixelsA, pixelsB, ms, steps):
+    commands = []
+    for step in range(steps):
+        pixels = lerp_pixels(pixelsA, pixelsB, step, steps)
+        commands.append(build_command_write(0, pixels, ms // steps))
+    return commands
+
+def write_cmd_as_display_string(cmd):
+    pixels = structure(cmd[6:])
+    return '(%s) ' % (cmd[3]) + ''.join(['O' if pix != (0,0,0) else '_' for pix in pixels])
+
+def send_one_packet(host, port, commands):
+    pkt = build_packet(commands)
+
+    s = socket.socket()
+    s.connect((host, port))
+    #print("Sending packet: %r" % pkt, file=sys.stderr)
     s.send(pkt)
     s.close()
 
+def send_one_write(args):
+    # Send a single write to the specified host and disconnect
+    pixels = [color_to_rgb(col) for col in args.color] * args.repeat
+    pixels = scale_pixels(pixels, args.brightness / 100.0)
+    cmds = [build_command_write(args.start, pixels, args.delay)]
+    send_one_packet(args.host, args.port, cmds)
+
+def send_commands(host, port, command_iter):
+    s = socket.socket()
+    s.connect((host, port))
+
+    cmds = []
+    for cmd in command_iter:
+        try:
+            build_packet(cmds + [cmd])
+        except ValueError:
+            print("Packet contains commands:")
+            for cmd in cmds:
+                print(write_cmd_as_display_string(cmd))
+            print()
+
+            pkt = build_packet(cmds)
+            cmds = []
+            #print("Sending packet: %r" % pkt, file=sys.stderr)
+            s.send(pkt)
+
+        cmds.append(cmd)
+
+    if cmds:
+        print("Packet contains commands:")
+        for cmd in cmds:
+            print(write_cmd_as_display_string(cmd))
+        print()
+        pkt = build_packet(cmds)
+        cmds = []
+        #print("Sending packet: %r" % pkt, file=sys.stderr)
+        s.send(pkt)
+
+    s.close()
+
+def parse_colors(cpixels):
+    return [color_to_rgb(c) for c in cpixels]
+
+def shift(pixels, direction, ms, steps):
+    commands = []
+    pixels = collections.deque(pixels)
+    delay = ms // steps
+    delays = [255] * (delay // 256) + [delay % 256]
+    for step in range(steps):
+        for delay in delays:
+            commands.append(build_command_write(0, list(pixels), delay))
+        if direction > 0:
+            pixels.append(pixels.popleft())
+        elif direction < 0:
+            pixels.appendleft(pixels.pop())
+    return commands
+
+def white_cycle(num_pix, ms):
+    pixels = collections.deque([(8,8,8)] + [(0,0,0)] * (num_pix - 1))
+    delay = ms // num_pix
+    delays = [255] * (delay // 256) + [delay % 256]
+    direction = 1
+    while True:
+        for delay in delays:
+            yield build_command_write(0, list(pixels), delay)
+        if direction > 0:
+            pixels.append(pixels.popleft())
+        elif direction < 0:
+            pixels.appendleft(pixels.pop())
+        if pixels[0][0]:
+            direction *= -1
+
 def main():
-    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-c", "--host", help="IP address to connect to")
     parser.add_argument("-p", "--port", type=int, default=1000, help="Port to connect to (default: 10000)")
@@ -65,12 +188,16 @@ def main():
 
     write_parser = subparsers.add_parser('write')
     write_parser.set_defaults(func=send_one_write)
+    write_parser.add_argument('--brightness', type=float, default=100.0,
+                              help="Scale brightness to this percent (default: 100)")
     write_parser.add_argument("--delay", type=int, default=0, help="Delay after write (default: 0)")
     write_parser.add_argument("--start", type=int, default=0, help="First LED to change (default: 0)")
-    write_parser.add_argument("rgb", type=int, nargs='*', help="R/G/B of pixel (specify R1 G1 B1 R2 G2 B2 ...)")
+    write_parser.add_argument("--repeat", type=int, default=1, help="Number of times to repeat color sequence given (default: 1)")
+    write_parser.add_argument("color", nargs='*', help="Color of pixel: dec r,g,b; hex rrggbb; any html color name")
 
     args = parser.parse_args()
     args.func(args)
 
 if __name__ == '__main__':
+    #send_commands('192.168.60.207', 10000, white_cycle(10, 1000))
     main()

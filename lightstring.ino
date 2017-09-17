@@ -11,7 +11,7 @@
 // How many NeoPixels are attached to the Arduino?
 #define NUMPIXELS      20
 
-#define BUFSIZE        2048
+#define BUFSIZE        32768
 
 const char* ssid = "SSID";
 const char* password = "PASSWORD";
